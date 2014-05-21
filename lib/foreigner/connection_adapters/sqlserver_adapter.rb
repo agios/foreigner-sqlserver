@@ -6,58 +6,49 @@ module Foreigner
       def foreign_keys(table_name)
         # Called from schema_dump
         fk_info = select_all %{
-          SELECT  to_table.name AS to_table,
-                  -- from_table.name AS from_table,
-                  from_column.name AS from_column,
-                  to_column.name AS primary_key,
-                  foreign_key.name AS name,
-		  OBJECTPROPERTY(foreign_key.id,'CnstIsUpdateCascade') as update_is_cascade,
-		  OBJECTPROPERTY(foreign_key.id,'CnstIsDeleteCascade') as delete_is_cascade
-          FROM    sysobjects AS from_table,
-                  sysforeignkeys AS f,
-                  sysobjects AS to_table,
-                  sysobjects AS foreign_key,
-                  syscolumns AS from_column,
-                  syscolumns AS to_column
-          WHERE   from_table.type = 'U'
-            AND   from_table.id = f.fkeyid
-            AND   f.constid = foreign_key.id
-            AND   f.rkeyid = to_table.id
-            AND   f.fkey = from_column.colid
-            AND   from_column.id = from_table.id
-            AND   f.rkey = to_column.colid
-            AND   to_column.id = to_table.id
-            AND   from_table.name = '#{table_name}'
-          ORDER BY from_table.name, to_table.name, foreign_key.name, from_column.name
+          SELECT      to_table.name AS to_table,
+                      from_column.name AS from_column,
+                      to_column.name AS primary_key,
+                      fk.name AS name,
+                      fk.delete_referential_action_desc AS delete_rule
+          FROM        sys.foreign_keys fk
+          INNER JOIN  sys.objects from_table ON fk.parent_object_id = from_table.object_id
+          INNER JOIN  sys.objects to_table ON fk.referenced_object_id = to_table.object_id
+          INNER JOIN  sys.columns to_column ON to_table.object_id = to_column.object_id AND to_column.column_id=fk.key_index_id
+          INNER JOIN  sys.foreign_key_columns from_columns ON fk.object_id = from_columns.constraint_object_id
+          INNER JOIN  sys.columns from_column ON from_table.object_id = from_column.object_id AND from_column.column_id=from_columns.parent_column_id
+          WHERE       from_table.name = '#{table_name}'
+          ORDER BY    to_table.name, fk.name, from_column.name
         }
 
         fk_info.map do |row|
           options = {:column => row['from_column'], :name => row['name'], :primary_key => row['primary_key']}
 
           options[:dependent] =
-	    if row['delete_is_cascade']
-	      if row['update_is_cascade']
-		:cascade
-	      else
-		:delete
-	      end
-	    else
-	      :restrict
-	    end
-	    # Don't know how to extract ON DELETE DEFAULT, ON DELETE SET NULL
+            case row['delete_rule']
+            when /NO_ACTION/
+              :restrict
+            when /CASCADE/
+              :delete
+            when /SET_NULL/
+              :nullify
+            end
 
           ForeignKeyDefinition.new(table_name, row['to_table'], options)
+        end
+      end
+
+      def dependency_sql(dependency)
+        case dependency
+        when :nullify then "ON DELETE SET NULL"
+        when :delete then "ON DELETE CASCADE"
+        when :restrict then "ON DELETE NO ACTION"
+        else ""
         end
       end
     end
   end
 end
 
-[:SQLServerAdapter, :JdbcAdapter].each do |adapter|
-  begin
-    ActiveRecord::ConnectionAdapters.const_get(adapter).class_eval do
-      include Foreigner::ConnectionAdapters::SQLServerAdapter
-    end
-  rescue
-  end
-end
+Foreigner::Adapter.safe_include :SQLServerAdapter, Foreigner::ConnectionAdapters::SQLServerAdapter
+Foreigner::Adapter.safe_include :JdbcAdapter, Foreigner::ConnectionAdapters::SQLServerAdapter
